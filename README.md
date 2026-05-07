@@ -1,4 +1,4 @@
-<![CDATA[<div align="center">
+<div align="center">
 
 # 🧠 Memory Forensics & Volatile Data Analysis Framework
 
@@ -200,4 +200,4 @@ This project was developed as part of an academic assignment for the **Advanced 
 **Built with 🔬 for Digital Forensics & Incident Response**
 
 </div>
-]]>
+</div>
