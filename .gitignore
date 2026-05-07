@@ -1,0 +1,20 @@
+# Environments
+venv/
+env/
+ENV/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Yara rules generated files
+yara_rules/_merged_rules.yar
+yara_rules/all_rules.yar
