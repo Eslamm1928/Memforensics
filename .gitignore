@@ -16,5 +16,5 @@ __pycache__/
 *.swp
 
 # Yara rules generated files
-yara_rules/_merged_rules.yar
-yara_rules/all_rules.yar
+MemLabs-Lab1.7z
+MemoryDump_Lab1.raw
