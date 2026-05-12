@@ -16,5 +16,6 @@ __pycache__/
 *.swp
 
 # Yara rules generated files
+D:\uni3\advanced forensecs\project\MemForensics_Framework\docs
 MemLabs-Lab1.7z
 MemoryDump_Lab1.raw

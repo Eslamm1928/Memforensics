@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
     QLabel, QTableWidget, QTableWidgetItem, QFileDialog, QFrame,
     QHeaderView, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect,
     QAbstractItemView, QStatusBar, QProgressBar, QMessageBox, QApplication,
-    QShortcut
+    QShortcut, QDialog
 )
 from PyQt5.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon, QColor, QPalette, QLinearGradient, QPainter, QKeySequence
@@ -42,6 +42,7 @@ COLORS = {
     "warning":        "#FFD93D",
     "info":           "#6CB4EE",
     "table_row_alt":  "#131925",
+    "purple":         "#A78BFA",
 }
 
 
@@ -260,10 +261,12 @@ class ForensicsPage(QWidget):
     """A page that contains a header label and a data table."""
 
     COLUMN_DEFS = {
-        "Processes": ["PID", "Name", "PPID", "Threads", "Handles", "Session", "Create Time", "Exit Time"],
-        "Network":   ["Protocol", "Local Address", "Local Port", "Remote Address", "Remote Port", "State", "PID", "Owner"],
-        "Credentials": ["User", "RID", "LM Hash", "NTLM Hash"],
-        "Malware Scan": ["PID", "Process", "Start VPN", "End VPN", "Protection", "Hexdump", "Disasm"],
+        "Processes":        ["PID", "Name", "PPID", "Threads", "Handles", "Session", "Create Time", "Exit Time"],
+        "Loaded DLLs":      ["PID", "Process", "Base Address", "Size", "DLL Name", "Path"],
+        "Network":          ["Protocol", "Local Address", "Local Port", "Remote Address", "Remote Port", "State", "PID", "Owner"],
+        "Credentials & Keys": ["User / Source", "RID / PID", "Hash / Key", "Extra", "Type"],
+        "Malware Scan":     ["PID", "Process", "Start VPN", "End VPN", "Protection", "Hexdump", "Disasm"],
+        "YARA Scan":        ["Rule", "PID", "Process", "Offset", "Match"],
     }
 
     def __init__(self, page_name: str, parent=None):
@@ -281,10 +284,12 @@ class ForensicsPage(QWidget):
 
         # ── Subtitle ─────────────────────────────
         descriptions = {
-            "Processes":    "Active and terminated processes extracted from the memory image.",
-            "Network":      "Recovered network sockets, connections, and listening ports.",
-            "Credentials":  "Encryption keys, passwords, and tokens detected in memory.",
-            "Malware Scan": "YARA rule matches and malware indicators found in process memory.",
+            "Processes":          "Active and terminated processes extracted from the memory image.",
+            "Loaded DLLs":        "Dynamic-Link Libraries loaded by each process in the memory image.",
+            "Network":            "Recovered network sockets, connections, and listening ports.",
+            "Credentials & Keys": "Password hashes, cached credentials, and encryption keys detected in memory.",
+            "Malware Scan":       "Suspicious memory regions with PAGE_EXECUTE_READWRITE permissions detected by malfind.",
+            "YARA Scan":          "Malware signature matches found using Neo23x0 and custom YARA rules.",
         }
         subtitle = QLabel(descriptions.get(page_name, ""))
         subtitle.setFont(QFont("Segoe UI", 10))
@@ -299,7 +304,7 @@ class ForensicsPage(QWidget):
         self.table.setRowCount(0)
 
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -373,6 +378,262 @@ class ForensicsPage(QWidget):
                 item = QTableWidgetItem(str(cell))
                 item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 self.table.setItem(r, c, item)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   SCAN  OPTIONS  DIALOG
+# ═══════════════════════════════════════════════════════════════════════════════
+class ScanOptionsDialog(QDialog):
+    """Dialog shown after loading a dump — lets user add custom YARA rules before scanning."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Scan Options")
+        self.setFixedSize(480, 260)
+        self.custom_rule_added = False
+
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {COLORS['bg_panel']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 12px;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+
+        # Title
+        title = QLabel("🛡  Scan Options")
+        title.setFont(QFont("Segoe UI Semibold", 15))
+        title.setStyleSheet(f"color: {COLORS['text_primary']};")
+        layout.addWidget(title)
+
+        # Description
+        desc = QLabel("Choose how to start the analysis pipeline.\n"
+                      "You can optionally add a custom YARA rule file before scanning.")
+        desc.setFont(QFont("Segoe UI", 10))
+        desc.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        # Status label (for custom rule feedback)
+        self.lbl_status = QLabel("")
+        self.lbl_status.setFont(QFont("Segoe UI", 9))
+        self.lbl_status.setStyleSheet(f"color: {COLORS['accent']};")
+        self.lbl_status.setWordWrap(True)
+        layout.addWidget(self.lbl_status)
+
+        layout.addStretch()
+
+        # Buttons row
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+
+        btn_style_secondary = f"""
+            QPushButton {{
+                background-color: {COLORS['bg_card']};
+                color: {COLORS['text_primary']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 10px;
+                padding: 10px 18px;
+                font-weight: 600;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['bg_hover']};
+                border-color: {COLORS['purple']};
+            }}
+        """
+
+        btn_style_primary = f"""
+            QPushButton {{
+                background-color: {COLORS['accent']};
+                color: {COLORS['bg_dark']};
+                border: none;
+                border-radius: 10px;
+                padding: 10px 22px;
+                font-weight: 700;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['accent_dim']};
+            }}
+        """
+
+        self.btn_custom = QPushButton("🔍  Add Custom YARA Rule")
+        self.btn_custom.setCursor(Qt.PointingHandCursor)
+        self.btn_custom.setStyleSheet(btn_style_secondary)
+        self.btn_custom.clicked.connect(self._add_custom_rule)
+        btn_layout.addWidget(self.btn_custom)
+
+        self.btn_start = QPushButton("▶  Start Scan")
+        self.btn_start.setCursor(Qt.PointingHandCursor)
+        self.btn_start.setStyleSheet(btn_style_primary)
+        self.btn_start.clicked.connect(self.accept)
+        btn_layout.addWidget(self.btn_start)
+
+        layout.addLayout(btn_layout)
+
+    def _add_custom_rule(self):
+        """Open the Rule Source dialog for URL or local file."""
+        dialog = RuleSourceDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.custom_rule_added = True
+            self.lbl_status.setStyleSheet(f"color: {COLORS['accent']};")
+            self.lbl_status.setText(f"✅  Added: {dialog.added_filename}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#   RULE  SOURCE  DIALOG  (URL or Local File)
+# ═══════════════════════════════════════════════════════════════════════════════
+class RuleSourceDialog(QDialog):
+    """Sub-dialog for adding a custom YARA rule from a URL or local file."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Custom YARA Rule")
+        self.setFixedSize(520, 320)
+        self.added_filename = ""
+
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {COLORS['bg_panel']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 12px;
+            }}
+            QLineEdit {{
+                background-color: {COLORS['bg_card']};
+                color: {COLORS['text_primary']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 8px;
+                padding: 10px 14px;
+                font-size: 12px;
+                font-family: 'Segoe UI';
+            }}
+            QLineEdit:focus {{
+                border-color: {COLORS['accent']};
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+
+        # Title
+        title = QLabel("🔍  Add Custom YARA Rule")
+        title.setFont(QFont("Segoe UI Semibold", 14))
+        title.setStyleSheet(f"color: {COLORS['text_primary']};")
+        layout.addWidget(title)
+
+        # URL input
+        url_label = QLabel("Paste a URL to a .yar rule file:")
+        url_label.setFont(QFont("Segoe UI", 10))
+        url_label.setStyleSheet(f"color: {COLORS['text_secondary']};")
+        layout.addWidget(url_label)
+
+        from PyQt5.QtWidgets import QLineEdit
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("https://raw.githubusercontent.com/.../rule.yar")
+        layout.addWidget(self.url_input)
+
+        # OR separator
+        or_label = QLabel("— OR —")
+        or_label.setFont(QFont("Segoe UI Semibold", 10))
+        or_label.setStyleSheet(f"color: {COLORS['text_muted']};")
+        or_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(or_label)
+
+        # Browse button
+        btn_style = f"""
+            QPushButton {{
+                background-color: {COLORS['bg_card']};
+                color: {COLORS['text_primary']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 10px;
+                padding: 10px 18px;
+                font-weight: 600;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['bg_hover']};
+                border-color: {COLORS['info']};
+            }}
+        """
+
+        self.btn_browse = QPushButton("📂  Browse Local File")
+        self.btn_browse.setCursor(Qt.PointingHandCursor)
+        self.btn_browse.setStyleSheet(btn_style)
+        self.btn_browse.clicked.connect(self._browse_file)
+        layout.addWidget(self.btn_browse)
+
+        # Selected file label
+        self.lbl_selected = QLabel("")
+        self.lbl_selected.setFont(QFont("Segoe UI", 9))
+        self.lbl_selected.setStyleSheet(f"color: {COLORS['text_muted']};")
+        self.lbl_selected.setWordWrap(True)
+        layout.addWidget(self.lbl_selected)
+
+        layout.addStretch()
+
+        # Add Rule button
+        btn_add_style = f"""
+            QPushButton {{
+                background-color: {COLORS['accent']};
+                color: {COLORS['bg_dark']};
+                border: none;
+                border-radius: 10px;
+                padding: 10px 22px;
+                font-weight: 700;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['accent_dim']};
+            }}
+        """
+
+        self.btn_add = QPushButton("✅  Add Rule")
+        self.btn_add.setCursor(Qt.PointingHandCursor)
+        self.btn_add.setStyleSheet(btn_add_style)
+        self.btn_add.clicked.connect(self._add_rule)
+        layout.addWidget(self.btn_add)
+
+        self._selected_file = None
+
+    def _browse_file(self):
+        """Open file dialog for local .yar file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select YARA Rule File", "",
+            "YARA Rules (*.yar *.yara);;All Files (*)"
+        )
+        if path:
+            self._selected_file = path
+            self.url_input.clear()
+            self.lbl_selected.setStyleSheet(f"color: {COLORS['info']};")
+            self.lbl_selected.setText(f"📄  {os.path.basename(path)}")
+
+    def _add_rule(self):
+        """Validate the source (URL or file) and add the rule."""
+        url_text = self.url_input.text().strip()
+
+        # Determine the source
+        if url_text:
+            source = url_text
+        elif self._selected_file:
+            source = self._selected_file
+        else:
+            QMessageBox.warning(self, "No Source",
+                                "Please enter a URL or select a local file.")
+            return
+
+        try:
+            scanner = YaraScanner()
+            dest = scanner.add_custom_rule(source)
+            self.added_filename = os.path.basename(dest)
+            self.accept()
+        except ValueError as e:
+            QMessageBox.critical(self, "YARA Rule Error", str(e))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -475,9 +736,11 @@ class MainWindow(QMainWindow):
         # ── Nav buttons ───────────────────────────
         nav_items = [
             ("⚙", "Processes"),
+            ("📦", "Loaded DLLs"),
             ("🌐", "Network"),
-            ("🔑", "Credentials"),
+            ("🔑", "Credentials & Keys"),
             ("🛡", "Malware Scan"),
+            ("🔍", "YARA Scan"),
         ]
 
         self.nav_buttons: list[NavButton] = []
@@ -545,11 +808,13 @@ class MainWindow(QMainWindow):
         cards_layout.setSpacing(16)
 
         self.card_processes = StatCard("Processes", "—", COLORS['accent'])
+        self.card_dlls      = StatCard("Loaded DLLs", "—", "#E879F9")
         self.card_network   = StatCard("Connections", "—", COLORS['info'])
-        self.card_creds     = StatCard("Credentials", "—", COLORS['warning'])
-        self.card_malware   = StatCard("Malware Hits", "—", COLORS['danger'])
+        self.card_creds     = StatCard("Creds & Keys", "—", COLORS['warning'])
+        self.card_malware   = StatCard("Malfind Hits", "—", COLORS['danger'])
+        self.card_yara      = StatCard("YARA Matches", "—", COLORS['purple'])
 
-        for card in (self.card_processes, self.card_network, self.card_creds, self.card_malware):
+        for card in (self.card_processes, self.card_dlls, self.card_network, self.card_creds, self.card_malware, self.card_yara):
             cards_layout.addWidget(card)
 
         return cards_layout
@@ -560,14 +825,18 @@ class MainWindow(QMainWindow):
         self.pages.setStyleSheet("background: transparent;")
 
         self.page_processes  = ForensicsPage("Processes")
+        self.page_dlls       = ForensicsPage("Loaded DLLs")
         self.page_network    = ForensicsPage("Network")
-        self.page_creds      = ForensicsPage("Credentials")
+        self.page_creds      = ForensicsPage("Credentials & Keys")
         self.page_malware    = ForensicsPage("Malware Scan")
+        self.page_yara       = ForensicsPage("YARA Scan")
 
         self.pages.addWidget(self.page_processes)
+        self.pages.addWidget(self.page_dlls)
         self.pages.addWidget(self.page_network)
         self.pages.addWidget(self.page_creds)
         self.pages.addWidget(self.page_malware)
+        self.pages.addWidget(self.page_yara)
 
         return self.pages
 
@@ -615,34 +884,42 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentIndex(index)
 
     def _load_dump(self):
-        """Open file dialog to select a memory dump, then kick off pslist scan."""
+        """Open file dialog to select a memory dump, then show scan options."""
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Memory Dump",
             "",
             "Memory Dumps (*.raw *.mem *.dmp *.vmem *.lime *.img);;All Files (*)"
         )
-        if path:
-            self.loaded_dump_path = path
-            fname = os.path.basename(path)
-            size_mb = os.path.getsize(path) / (1024 * 1024)
-            self.lbl_dump_info.setText(f"📄  {fname}  ({size_mb:,.1f} MB)")
-            self.lbl_dump_info.setStyleSheet(f"color: {COLORS['accent']};")
-            self.statusBar().showMessage(f"Loaded: {path}")
+        if not path:
+            return
 
-            # Clear any old data
-            self.page_processes.clear()
-            self.page_network.clear()
-            self.page_creds.clear()
-            self.page_malware.clear()
-            for card in (self.card_processes, self.card_network, self.card_creds, self.card_malware):
-                card.update_value("—")
+        self.loaded_dump_path = path
+        fname = os.path.basename(path)
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        self.lbl_dump_info.setText(f"📄  {fname}  ({size_mb:,.1f} MB)")
+        self.lbl_dump_info.setStyleSheet(f"color: {COLORS['accent']};")
+        self.statusBar().showMessage(f"Loaded: {path}")
 
-            # Start the background pslist scan
+        # Clear any old data
+        self.page_processes.clear()
+        self.page_dlls.clear()
+        self.page_network.clear()
+        self.page_creds.clear()
+        self.page_malware.clear()
+        self.page_yara.clear()
+        for card in (self.card_processes, self.card_dlls, self.card_network, self.card_creds, self.card_malware, self.card_yara):
+            card.update_value("—")
+
+        # Show scan options dialog before starting the pipeline
+        dialog = ScanOptionsDialog(self)
+        result = dialog.exec_()
+
+        if result == QDialog.Accepted:
             self._run_pslist()
 
     # ══════════════════════════════════════════════════════════════════════════
-    #   BACKGROUND  VOLATILITY  SCANS  (5-step pipeline)
+    #   BACKGROUND  VOLATILITY  SCANS  (7-step pipeline)
     # ══════════════════════════════════════════════════════════════════════════
 
     def _start_scan(self, method_name: str, status_msg: str, on_done, on_error):
@@ -665,22 +942,37 @@ class MainWindow(QMainWindow):
 
     # ── 1. PSLIST ─────────────────────────────────────────────────────────────
     def _run_pslist(self):
-        self._start_scan("run_pslist", "⏳  [1/5] Process Extraction (pslist) …",
+        self._start_scan("run_pslist", "⏳  [1/7] Process Extraction (pslist) …",
                          self._on_pslist_done, self._on_pslist_error)
 
     def _on_pslist_done(self, rows: list):
         self.page_processes.populate(rows)
         self.card_processes.update_value(str(len(rows)))
         self._on_nav_clicked(0)
-        self._run_netscan()
+        self._run_dlllist()
 
     def _on_pslist_error(self, msg: str):
         self.statusBar().showMessage("⚠  pslist failed — continuing pipeline …")
+        self._run_dlllist()
+
+    # ── 2. DLLLIST ────────────────────────────────────────────────────────────
+    def _run_dlllist(self):
+        self._start_scan("run_dlllist", "⏳  [2/7] DLL Extraction (dlllist) …",
+                         self._on_dlllist_done, self._on_dlllist_error)
+
+    def _on_dlllist_done(self, rows: list):
+        self.page_dlls.populate(rows)
+        self.card_dlls.update_value(str(len(rows)))
         self._run_netscan()
 
-    # ── 2. NETSCAN ────────────────────────────────────────────────────────────
+    def _on_dlllist_error(self, msg: str):
+        self.card_dlls.update_value("0")
+        self.statusBar().showMessage("⚠  dlllist failed — continuing pipeline …")
+        self._run_netscan()
+
+    # ── 3. NETSCAN ────────────────────────────────────────────────────────────
     def _run_netscan(self):
-        self._start_scan("run_netscan", "⏳  [2/5] Network Socket Recovery (netscan) …",
+        self._start_scan("run_netscan", "⏳  [3/7] Network Socket Recovery (netscan) …",
                          self._on_netscan_done, self._on_netscan_error)
 
     def _on_netscan_done(self, rows: list):
@@ -693,9 +985,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("⚠  netscan failed — continuing pipeline …")
         self._run_malfind()
 
-    # ── 3. MALFIND ────────────────────────────────────────────────────────────
+    # ── 4. MALFIND ────────────────────────────────────────────────────────────
     def _run_malfind(self):
-        self._start_scan("run_malfind", "⏳  [3/5] Injection Detection (malfind) …",
+        self._start_scan("run_malfind", "⏳  [4/7] Injection Detection (malfind) …",
                          self._on_malfind_done, self._on_malfind_error)
 
     def _on_malfind_done(self, rows: list):
@@ -710,29 +1002,49 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("⚠  malfind failed — continuing pipeline …")
         self._run_hashdump()
 
-    # ── 4. HASHDUMP ───────────────────────────────────────────────────────────
+    # ── 5. HASHDUMP ───────────────────────────────────────────────────────────
     def _run_hashdump(self):
-        self._start_scan("run_hashdump", "⏳  [4/5] Credential Recovery (hashdump) …",
+        self._start_scan("run_hashdump", "⏳  [5/7] Credential Recovery (hashdump) …",
                          self._on_hashdump_done, self._on_hashdump_error)
 
     def _on_hashdump_done(self, rows: list):
+        self._hashdump_rows = rows
         self.page_creds.populate(rows)
         self.card_creds.update_value(str(len(rows)))
-        self._run_auto_yarascan()
+        self._run_encryption_scan()
 
     def _on_hashdump_error(self, msg: str):
+        self._hashdump_rows = []
         self.card_creds.update_value("0")
         self.statusBar().showMessage("⚠  hashdump skipped — continuing pipeline …")
+        self._run_encryption_scan()
+
+    # ── 6. ENCRYPTION SCAN ────────────────────────────────────────────────────
+    def _run_encryption_scan(self):
+        self._start_scan("run_encryption_scan", "⏳  [6/7] Encryption Key Detection …",
+                         self._on_encryption_done, self._on_encryption_error)
+
+    def _on_encryption_done(self, rows: list):
+        # Append encryption results to existing hashdump rows in the Credentials & Keys table
+        if rows:
+            existing = getattr(self, '_hashdump_rows', [])
+            combined = existing + rows
+            self.page_creds.populate(combined)
+            self.card_creds.update_value(str(len(combined)))
         self._run_auto_yarascan()
 
-    # ── 5. AUTO YARA SCAN ─────────────────────────────────────────────────────
+    def _on_encryption_error(self, msg: str):
+        self.statusBar().showMessage("⚠  Encryption scan skipped — continuing pipeline …")
+        self._run_auto_yarascan()
+
+    # ── 7. AUTO YARA SCAN ─────────────────────────────────────────────────────
     def _run_auto_yarascan(self):
         """Launch automated YARA scan with Neo23x0 + local rules."""
         self.btn_load.setEnabled(False)
         self.progress.setRange(0, 0)
         self.progress.setVisible(True)
         self.statusBar().showMessage(
-            "⏳  [5/5] YARA Signature Scan (Neo23x0 rules) …"
+            "⏳  [7/7] YARA Signature Scan (Neo23x0 rules) …"
         )
 
         self._yara_worker = YaraWorker(self.loaded_dump_path)
@@ -741,33 +1053,18 @@ class MainWindow(QMainWindow):
         self._yara_worker.start()
 
     def _on_yarascan_done(self, rows: list):
-        """Append YARA matches to the Malware table after malfind rows."""
+        """Populate the dedicated YARA Scan page with YARA matches."""
         self._finish_pipeline()
 
-        # Build 7-col rows: [PID, Process, Start VPN, End VPN, Protection, Hexdump, Disasm]
-        existing = self.page_malware.table.rowCount()
-        self.page_malware.table.setRowCount(existing + len(rows))
-        for ri, r in enumerate(rows):
-            # r = [Rule, PID, Process, Offset, Match]
-            yara_row = [
-                r[1],                     # PID
-                f"[YARA] {r[2]}",         # Process (prefixed)
-                r[3],                     # Offset as Start VPN
-                "",                       # End VPN
-                f"Rule: {r[0]}",          # Protection col → rule name
-                r[4],                     # Hexdump col → match string
-                "",                       # Disasm
-            ]
-            for ci, cell in enumerate(yara_row):
-                item = QTableWidgetItem(str(cell))
-                item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                self.page_malware.table.setItem(existing + ri, ci, item)
+        # Populate the YARA page directly — rows are already [Rule, PID, Process, Offset, Match]
+        self.page_yara.populate(rows)
+        self.card_yara.update_value(str(len(rows)))
 
-        total = existing + len(rows)
-        self.card_malware.update_value(str(total))
+        malfind_count = len(self._malfind_rows)
+        yara_count = len(rows)
         self.statusBar().showMessage(
-            f"✅  All 5 scans complete — {len(self._malfind_rows)} injections + "
-            f"{len(rows)} YARA matches = {total} total hits"
+            f"✅  All 7 scans complete — {malfind_count} injections (malfind) + "
+            f"{yara_count} YARA signature matches"
         )
 
     def _on_yarascan_error(self, msg: str):

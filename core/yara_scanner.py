@@ -1,6 +1,7 @@
 # yara_scanner.py - YARA scanning module
 import os
 import glob
+import shutil
 import urllib.request
 from core.vol_wrapper import VolatilityManager
 
@@ -25,6 +26,57 @@ class YaraScanner:
             "gen_mimikatz.yar": "https://raw.githubusercontent.com/Neo23x0/signature-base/master/yara/gen_mimikatz.yar"
         }
 
+    def add_custom_rule(self, source):
+        """Validate and add a custom YARA rule from a local path or URL."""
+        temp_file = None
+        
+        try:
+            # Check if source is a URL
+            if source.startswith("http://") or source.startswith("https://"):
+                # Download to a temp file
+                filename = source.split("/")[-1].split("?")[0]
+                if not filename.endswith((".yar", ".yara")):
+                    filename = "custom_downloaded.yar"
+                temp_file = os.path.join(self.rules_folder, f"_temp_{filename}")
+                try:
+                    urllib.request.urlretrieve(source, temp_file)
+                except Exception as e:
+                    raise ValueError(f"Download failed for URL:\n{source}\n\nError: {e}")
+                local_path = temp_file
+            else:
+                # Local file
+                if not os.path.exists(source):
+                    raise ValueError(f"File not found:\n{source}")
+                local_path = source
+                filename = os.path.basename(source)
+            
+            # Validate with yara-python if available
+            if HAS_YARA:
+                try:
+                    yara.compile(filepath=local_path)
+                except yara.SyntaxError as e:
+                    raise ValueError(f"YARA Syntax Error in '{filename}':\n{e}")
+                except Exception as e:
+                    raise ValueError(f"Failed to compile '{filename}':\n{e}")
+            
+            # Copy/move to rules folder with final name
+            dest = os.path.join(self.rules_folder, filename)
+            if temp_file and os.path.exists(temp_file):
+                # Rename temp file to final name
+                if os.path.exists(dest):
+                    os.remove(dest)
+                os.rename(temp_file, dest)
+                temp_file = None  # Prevent cleanup since we renamed it
+            else:
+                shutil.copy(local_path, dest)
+            
+            return dest
+            
+        finally:
+            # Cleanup temp file if something went wrong
+            if temp_file and os.path.exists(temp_file):
+                os.remove(temp_file)
+
     def download_missing_rules(self):
         # Download rules from internet
         for filename, link in self.urls.items():
@@ -40,10 +92,14 @@ class YaraScanner:
         all_files = glob.glob(os.path.join(self.rules_folder, "*.yar"))
         merged_file = os.path.join(self.rules_folder, "all_rules.yar")
         
+        # Files to skip during merge
+        skip_names = {"all_rules.yar", "_merged_rules.yar"}
+        
         with open(merged_file, "w", encoding="utf-8") as out_file:
             for filepath in all_files:
-                # Skip the merged file itself
-                if "all_rules.yar" in filepath:
+                # Skip generated/merged files
+                basename = os.path.basename(filepath)
+                if basename in skip_names:
                     continue
                     
                 # Test the rule with yara-python if available
@@ -54,11 +110,11 @@ class YaraScanner:
                         print(f"Skipping broken rule file: {filepath}")
                         continue
                         
-                # Add file content
+                # Add file content with proper newlines
                 content = open(filepath, "r", encoding="utf-8", errors="ignore").read()
-                out_file.write(f"\\n// File: {filepath}\\n")
+                out_file.write(f"\n// File: {basename}\n")
                 out_file.write(content)
-                out_file.write("\\n")
+                out_file.write("\n")
                 
         return merged_file
 
@@ -70,3 +126,4 @@ class YaraScanner:
         # Run volatility
         vol = VolatilityManager(dump_path)
         return vol.run_yarascan(merged_file)
+

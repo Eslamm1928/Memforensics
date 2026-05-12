@@ -55,6 +55,21 @@ class VolatilityManager:
             ])
         return rows
 
+    def run_dlllist(self):
+        # Get loaded DLLs for all processes
+        data = self.run_command("windows.dlllist.DllList")
+        rows = []
+        for item in data:
+            rows.append([
+                str(item.get("PID", "")),
+                str(item.get("Process", item.get("ImageFileName", ""))),
+                str(item.get("Base", item.get("BaseDllAddr", ""))),
+                str(item.get("Size", item.get("SizeOfImage", ""))),
+                str(item.get("Name", item.get("BaseDllName", ""))),
+                str(item.get("Path", item.get("FullDllName", "")))
+            ])
+        return rows
+
     def run_netscan(self):
         # Get network connections
         data = self.run_command("windows.netscan.NetScan")
@@ -97,13 +112,53 @@ class VolatilityManager:
                 str(item.get("User", "")),
                 str(item.get("RID", item.get("rid", ""))),
                 str(item.get("lmhash", item.get("LMHash", ""))),
-                str(item.get("nthash", item.get("NTHash", "")))
+                str(item.get("nthash", item.get("NTHash", ""))),
+                "Password Hash"  # Type column
             ])
+        return rows
+
+    def run_encryption_scan(self):
+        # Scan for encryption keys (TrueCrypt, BitLocker, etc.)
+        rows = []
+        
+        # Try truecrypt passphrase extraction
+        data = self.run_command("windows.truecrypt.Passphrase")
+        for item in data:
+            rows.append([
+                str(item.get("Process", item.get("ImageFileName", "TrueCrypt"))),
+                str(item.get("PID", "")),
+                str(item.get("Passphrase", item.get("Password", item.get("Key", "")))),
+                "",
+                "TrueCrypt Key"
+            ])
+        
+        # Try lsadump for LSA secrets (may contain encryption keys, VPN passwords, etc.)
+        data2 = self.run_command("windows.lsadump.Lsadump")
+        for item in data2:
+            rows.append([
+                str(item.get("Key", item.get("Name", "LSA Secret"))),
+                "",
+                str(item.get("Secret", item.get("Value", "")))[:60],
+                str(item.get("Hex", "")),
+                "LSA Secret"
+            ])
+        
+        # Try cachedump for cached domain credentials
+        data3 = self.run_command("windows.cachedump.Cachedump")
+        for item in data3:
+            rows.append([
+                str(item.get("UserName", item.get("User", ""))),
+                str(item.get("DomainName", item.get("Domain", ""))),
+                str(item.get("Hash", item.get("Cachedump", "")))[:60],
+                "",
+                "Cached Credential"
+            ])
+        
         return rows
 
     def run_yarascan(self, yara_file):
         # Scan with YARA rules
-        data = self.run_command("windows.yarascan.YaraScan", ["--yara-file", yara_file])
+        data = self.run_command("windows.vadyarascan.VadYaraScan", ["--yara-file", yara_file])
         rows = []
         for item in data:
             rows.append([
@@ -114,3 +169,4 @@ class VolatilityManager:
                 str(item.get("Match", item.get("Value", item.get("String", ""))))[:80]
             ])
         return rows
+

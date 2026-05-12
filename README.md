@@ -36,7 +36,7 @@ Traditional forensic tools require extensive manual configuration, plugin-by-plu
 
 ## 💡 Our Solution
 
-**MemForensics** is a **fully automated, zero-click desktop framework** that transforms raw memory dumps into structured forensic intelligence. An investigator simply loads a memory image, and the framework automatically executes a **5-step analysis pipeline** — extracting processes, recovering network sockets, detecting injected code, dumping credentials, and scanning for malware signatures using industry-standard YARA rules.
+**MemForensics** is a **fully automated, zero-click desktop framework** that transforms raw memory dumps into structured forensic intelligence. An investigator simply loads a memory image, and the framework automatically executes a **7-step analysis pipeline** — extracting processes, enumerating DLLs, recovering network sockets, detecting injected code, dumping credentials, scanning for encryption keys, and matching malware signatures using industry-standard YARA rules.
 
 > **Zero manual intervention. Zero command-line interaction. Full forensic coverage.**
 
@@ -47,10 +47,12 @@ Traditional forensic tools require extensive manual configuration, plugin-by-plu
 | # | Feature | Volatility3 Plugin | Description |
 |---|---------|-------------------|-------------|
 | 1 | **Process Extraction** | `windows.pslist` | Lists all running/terminated processes with PID, PPID, threads, handles, and timestamps |
-| 2 | **Network Socket Recovery** | `windows.netscan` | Recovers active TCP/UDP connections, listening ports, local/remote IPs, and owning processes |
-| 3 | **Injection Detection** | `windows.malfind` | Identifies suspicious memory regions with `PAGE_EXECUTE_READWRITE` permissions — a hallmark of code injection |
-| 4 | **Credential Recovery** | `windows.hashdump` | Extracts Windows SAM database entries including usernames, RIDs, LM hashes, and NTLM hashes |
-| 5 | **YARA Malware Scan** | `windows.yarascan` | Auto-fetches **Neo23x0/signature-base** threat intelligence rules and scans process memory for known malware signatures |
+| 2 | **DLL Enumeration** | `windows.dlllist` | Extracts loaded Dynamic-Link Libraries for each process with base address, size, and full path |
+| 3 | **Network Socket Recovery** | `windows.netscan` | Recovers active TCP/UDP connections, listening ports, local/remote IPs, and owning processes |
+| 4 | **Injection Detection** | `windows.malfind` | Identifies suspicious memory regions with `PAGE_EXECUTE_READWRITE` permissions — a hallmark of code injection |
+| 5 | **Credential Recovery** | `windows.hashdump` | Extracts Windows SAM database entries including usernames, RIDs, LM hashes, and NTLM hashes |
+| 6 | **Encryption Key Detection** | `windows.truecrypt` / `windows.bitlocker` / `windows.cachedump` | Scans for TrueCrypt passphrases, BitLocker FVEKs, and cached domain credentials |
+| 7 | **YARA Malware Scan** | `windows.vadyarascan` | Auto-fetches **Neo23x0/signature-base** threat intelligence rules and scans process memory for known malware signatures |
 
 ### Additional Highlights
 
@@ -58,6 +60,8 @@ Traditional forensic tools require extensive manual configuration, plugin-by-plu
 - ⚡ **Non-Blocking Architecture** — All scans execute on background `QThread` workers, keeping the GUI fully responsive
 - 🛡 **Resilient Pipeline** — If any scan fails, the pipeline gracefully continues to the next step without blocking popups
 - 📦 **Auto-Setup** — Dependencies are automatically installed from `requirements.txt` on first launch
+- 🔍 **Custom YARA Rules** — Add custom rules via local file or URL before each scan (with syntax validation)
+- 🔐 **Encryption Key Recovery** — Automatic detection of TrueCrypt, BitLocker, and cached domain credentials
 
 ---
 
@@ -89,7 +93,7 @@ MemForensics_Framework/
 │
 ├── gui/
 │   ├── __init__.py
-│   └── main_window.py          # PyQt5 dashboard — full UI + 5-step pipeline
+│   └── main_window.py          # PyQt5 dashboard — full UI + 7-step pipeline
 │
 └── yara_rules/
     ├── example.yar             # Sample custom rule
@@ -192,6 +196,29 @@ Rules are downloaded **silently on first scan** and cached in the `yara_rules/` 
 ## 📄 License
 
 This project was developed as part of an academic assignment for the **Advanced Digital Forensics** course.
+
+---
+
+## 🔮 Future Work
+
+### Cross-OS Support (Linux / macOS)
+
+The current framework is optimized for **Windows memory images** exclusively (`windows.*` plugin prefix). Extending to Linux and macOS dumps would require:
+
+1. **OS Auto-Detection**: Implementing a pre-scan step using `banners.Banners` or `configwriter.ConfigWriter` to detect the OS profile of the loaded memory dump before running any analysis plugins.
+
+2. **Dynamic Plugin Mapping**: Creating an OS-to-plugin mapping table:
+   | OS | Process List | Network | Injection | Hashes |
+   |---|---|---|---|---|
+   | Windows | `windows.pslist` | `windows.netscan` | `windows.malfind` | `windows.hashdump` |
+   | Linux | `linux.pslist` | `linux.sockstat` | `linux.malfind` | N/A |
+   | macOS | `mac.pslist` | `mac.netstat` | `mac.malfind` | N/A |
+
+3. **Column Adaptation**: Each OS returns different JSON schemas, requiring OS-specific column definitions in the `ForensicsPage.COLUMN_DEFS` dictionary.
+
+4. **Credential Plugin Availability**: Not all credential plugins are available for all OS types (e.g., `hashdump` is Windows-only).
+
+> **Decision Rationale**: This enhancement was deferred to avoid breaking the current stable zero-click pipeline. The architectural change touches every layer (backend, GUI columns, stat cards, error handling) and requires extensive testing with verified Linux/macOS memory dumps.
 
 ---
 
